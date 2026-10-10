@@ -27,6 +27,10 @@ case "$ACTION" in
         echo "[*] Starting webcam server with model: $MODEL"
         "$VENV_PYTHON" "$SCRIPT_DIR/scripts/run_webcam.py" --model "$MODEL" "${@:3}"
         ;;
+    "mobile")
+        echo "[*] Starting Mobile Camera server with model: $MODEL"
+        "$VENV_PYTHON" "$SCRIPT_DIR/scripts/run_mobile_cam.py" --model "$MODEL" "${@:3}"
+        ;;
     "help"|*)
         echo "=========================================="
         echo "  KavachX Local Runner"
