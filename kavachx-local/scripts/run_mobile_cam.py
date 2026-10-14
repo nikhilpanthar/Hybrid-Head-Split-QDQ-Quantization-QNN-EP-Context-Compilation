@@ -48,8 +48,10 @@ def generate_anchors():
 
 ANCHOR_X, ANCHOR_Y, STRIDE = generate_anchors()
 
-def fast_dfl_and_nms(bbox_dist, cls_scores, conf_thresh=0.35, iou_thresh=0.30, ios_thresh=0.38, orig_shape=(480, 640)):
+def fast_dfl_and_nms(bbox_dist, cls_scores, conf_thresh=0.15, iou_thresh=0.30, ios_thresh=0.38,
+                     letterbox=(1.0, 0.0, 0.0), orig_shape=(480, 640)):
     h_orig, w_orig = orig_shape
+    r, dw, dh = letterbox
     scores_all = cls_scores[0]  # [3, 8400]
     max_scores = np.max(scores_all, axis=0)  # [8400]
     cands = np.where(max_scores >= conf_thresh)[0]
@@ -74,13 +76,11 @@ def fast_dfl_and_nms(bbox_dist, cls_scores, conf_thresh=0.35, iou_thresh=0.30, i
     x2 = (ANCHOR_X[cands] + c_dist[2]) * STRIDE[cands]
     y2 = (ANCHOR_Y[cands] + c_dist[3]) * STRIDE[cands]
 
-    # Scale directly to original image space
-    scale_x = w_orig / 640.0
-    scale_y = h_orig / 640.0
-    x1 = np.clip(x1 * scale_x, 0, w_orig)
-    y1 = np.clip(y1 * scale_y, 0, h_orig)
-    x2 = np.clip(x2 * scale_x, 0, w_orig)
-    y2 = np.clip(y2 * scale_y, 0, h_orig)
+    # Map from 640x640 letterbox space back to the original image space
+    x1 = np.clip((x1 - dw) / r, 0, w_orig)
+    y1 = np.clip((y1 - dh) / r, 0, h_orig)
+    x2 = np.clip((x2 - dw) / r, 0, w_orig)
+    y2 = np.clip((y2 - dh) / r, 0, h_orig)
 
     boxes = np.column_stack([x1, y1, x2, y2])
 
@@ -129,8 +129,142 @@ def fast_dfl_and_nms(bbox_dist, cls_scores, conf_thresh=0.35, iou_thresh=0.30, i
         })
     return detections
 
+
+def compute_iou(a, b):
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1 = max(ax1, bx1)
+    iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+    iw = max(0.0, ix2 - ix1)
+    ih = max(0.0, iy2 - iy1)
+    inter = iw * ih
+    area_a = max(0.0, (ax2 - ax1) * (ay2 - ay1))
+    area_b = max(0.0, (bx2 - bx1) * (by2 - by1))
+    union = area_a + area_b - inter
+    return inter / union if union > 0.0 else 0.0
+
+
+def _box_area(box):
+    x1, y1, x2, y2 = box
+    return max(0.0, x2 - x1) * max(0.0, y2 - y1)
+
+
+def _box_inter(a, b):
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    iw = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+    ih = max(0.0, min(ay2, by2) - max(ay1, by1))
+    return iw * ih
+
+
+def suppress_duplicates(dets, iou_thresh=0.45, ios_thresh=0.35):
+    """Remove same-class boxes that are contained in, or heavily overlap, a
+    larger box — fixes a full-body 'person' box plus a smaller nested box."""
+    if len(dets) <= 1:
+        return dets
+
+    by_class = {}
+    for d in dets:
+        by_class.setdefault(d["class_id"], []).append(d)
+
+    kept = []
+    for cds in by_class.values():
+        cds = sorted(cds, key=lambda d: (-_box_area(d["bbox"]), -d["confidence"]))
+        while cds:
+            best = cds[0]
+            kept.append(best)
+            rest = cds[1:]
+            survivors = []
+            best_area = _box_area(best["bbox"])
+            for other in rest:
+                inter = _box_inter(best["bbox"], other["bbox"])
+                min_area = min(best_area, _box_area(other["bbox"]))
+                ios = inter / min_area if min_area > 0 else 0.0
+                iou = compute_iou(best["bbox"], other["bbox"])
+                if not (iou > iou_thresh or ios > ios_thresh):
+                    survivors.append(other)
+            cds = survivors
+    return kept
+
+
+class DetectionTracker:
+    """Smooths boxes/confidences across frames and keeps detections alive
+    for a few frames so they do not flicker in and out."""
+
+    def __init__(self, box_alpha=0.5, conf_alpha=0.6, iou_match=0.25,
+                 max_age=8, min_hits=2):
+        self.box_alpha = box_alpha
+        self.conf_alpha = conf_alpha
+        self.iou_match = iou_match
+        self.max_age = max_age
+        self.min_hits = min_hits
+        self.tracks = []
+
+    def update(self, detections):
+        used_det = set()
+        used_trk = set()
+
+        order = sorted(range(len(detections)),
+                       key=lambda i: -detections[i]["confidence"])
+
+        for di in order:
+            det = detections[di]
+            best_t = -1
+            best_iou = self.iou_match
+            for ti, tr in enumerate(self.tracks):
+                if ti in used_trk or tr["class_id"] != det["class_id"]:
+                    continue
+                iou = compute_iou(tr["bbox"], det["bbox"])
+                if iou > best_iou:
+                    best_iou = iou
+                    best_t = ti
+            if best_t >= 0:
+                used_trk.add(best_t)
+                used_det.add(di)
+                tr = self.tracks[best_t]
+                a = self.box_alpha
+                tr["bbox"] = [a * n + (1 - a) * o for o, n in zip(tr["bbox"], det["bbox"])]
+                tr["confidence"] = (self.conf_alpha * det["confidence"]
+                                    + (1 - self.conf_alpha) * tr["confidence"])
+                tr["missed"] = 0
+                tr["hits"] += 1
+
+        for ti, tr in enumerate(self.tracks):
+            if ti not in used_trk:
+                tr["missed"] += 1
+
+        for di, det in enumerate(detections):
+            if di not in used_det:
+                self.tracks.append({
+                    "class_id": det["class_id"],
+                    "class_name": det["class_name"],
+                    "color": det["color"],
+                    "bbox": list(det["bbox"]),
+                    "confidence": det["confidence"],
+                    "missed": 0,
+                    "hits": 1,
+                })
+
+        self.tracks = [tr for tr in self.tracks if tr["missed"] < self.max_age]
+
+        out = []
+        for tr in self.tracks:
+            if tr["hits"] >= self.min_hits:
+                out.append({
+                    "class_id": tr["class_id"],
+                    "class_name": tr["class_name"],
+                    "confidence": float(round(tr["confidence"], 3)),
+                    "color": tr["color"],
+                    "bbox": [float(round(v, 1)) for v in tr["bbox"]],
+                })
+        return suppress_duplicates(out)
+
+
 SESSION = None
 INP_NAME = None
+TRACKER = None
 LOCK = threading.Lock()
 
 HTML_PAGE = """<!DOCTYPE html>
@@ -272,8 +406,8 @@ HTML_PAGE = """<!DOCTYPE html>
         </div>
         <div class="slider-group">
             <label for="conf-slider">Sens:</label>
-            <input type="range" id="conf-slider" min="0.15" max="0.80" step="0.05" value="0.35" oninput="updateConf(this.value)">
-            <span id="conf-val">0.35</span>
+            <input type="range" id="conf-slider" min="0.10" max="0.80" step="0.05" value="0.15" oninput="updateConf(this.value)">
+            <span id="conf-val">0.15</span>
         </div>
     </div>
 
@@ -293,7 +427,7 @@ HTML_PAGE = """<!DOCTYPE html>
 
         let isRunning = false;
         let stream = null;
-        let confThresh = 0.35;
+        let confThresh = 0.15;
         let currentFacingMode = 'environment'; // Rear camera default on mobile
         let offscreenCanvas = document.createElement('canvas');
         offscreenCanvas.width = 640;
@@ -338,8 +472,8 @@ HTML_PAGE = """<!DOCTYPE html>
                 });
                 video.srcObject = stream;
                 await video.play();
-                canvas.width = video.videoWidth || 640;
-                canvas.height = video.videoHeight || 480;
+                // Keep the display canvas at a fixed 640x480 logical size so
+                // detections (returned in the offscreen 640x480 space) map 1:1.
                 isRunning = true;
                 startBtn.innerText = "Stop Camera";
                 startBtn.classList.add("stop");
@@ -485,7 +619,7 @@ class InferHandler(BaseHTTPRequestHandler):
 
             parts = body.split(b"--" + boundary)
             jpeg_bytes = None
-            conf_val = 0.35
+            conf_val = 0.15
             orig_w = 640
             orig_h = 480
 
@@ -525,9 +659,17 @@ class InferHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
 
-            # Resize to 640x640 for YOLOv8
-            resized = cv2.resize(img, (640, 640))
-            rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+            # Letterbox to 640x640 (preserve aspect ratio, pad with gray)
+            h_img, w_img = img.shape[:2]
+            r = min(640.0 / h_img, 640.0 / w_img)
+            nw, nh = int(round(w_img * r)), int(round(h_img * r))
+            dw, dh = (640 - nw) / 2.0, (640 - nh) / 2.0
+            top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+            left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+            resized = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_LINEAR)
+            padded = cv2.copyMakeBorder(resized, top, bottom, left, right,
+                                        cv2.BORDER_CONSTANT, value=(114, 114, 114))
+            rgb = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB)
             blob = np.transpose(rgb, (2, 0, 1)).astype(np.float32) / 255.0
             blob = np.expand_dims(blob, axis=0)
 
@@ -537,12 +679,17 @@ class InferHandler(BaseHTTPRequestHandler):
                 outputs = SESSION.run(None, {INP_NAME: blob})
             cpu_ms = round((time.perf_counter() - t0) * 1000, 1)
 
-            # DFL + NMS
-            dets = fast_dfl_and_nms(
+            # DFL + NMS in letterbox space, mapped back to the decoded frame
+            raw_dets = fast_dfl_and_nms(
                 outputs[0], outputs[1],
                 conf_thresh=conf_val,
-                orig_shape=(orig_h, orig_w)
+                letterbox=(r, dw, dh),
+                orig_shape=(h_img, w_img)
             )
+
+            # Temporal smoothing + persistence to reduce jitter and flicker
+            with LOCK:
+                dets = TRACKER.update(raw_dets)
 
             resp_payload = json.dumps({"cpu_ms": cpu_ms, "detections": dets}).encode("utf-8")
             self.send_response(200)
@@ -560,7 +707,7 @@ class InferHandler(BaseHTTPRequestHandler):
 
 
 def main():
-    global SESSION, INP_NAME
+    global SESSION, INP_NAME, TRACKER
 
     parser = argparse.ArgumentParser(description="KavachX Mobile Camera Local Server")
     parser.add_argument("--port", type=int, default=8080, help="Port (default: 8080)")
@@ -585,6 +732,7 @@ def main():
     SESSION = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
     print(f"[+] Loaded model in {(time.time() - t0)*1000:.1f} ms!")
     INP_NAME = SESSION.get_inputs()[0].name
+    TRACKER = DetectionTracker()
 
     # Warmup
     dummy = np.zeros((1, 3, 640, 640), dtype=np.float32)
