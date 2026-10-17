@@ -18,8 +18,8 @@ import json
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODELS_DIR = os.path.join(BASE_DIR, "models")
 
-CLASSES = ["person", "fire", "smoke"]
-COLORS = {0: (0, 255, 0), 1: (0, 0, 255), 2: (128, 128, 128)}
+CLASSES = ["person", "smoke", "fire"]
+COLORS = {0: (0, 255, 0), 1: (128, 128, 128), 2: (0, 0, 255)}
 
 MODEL_MAP = {
     "baseline": "3class_split_qdq.onnx",

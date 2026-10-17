@@ -18,11 +18,11 @@ import onnxruntime as ort
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODELS_DIR = os.path.join(BASE_DIR, "models")
 
-CLASS_NAMES = {0: "person", 1: "fire", 2: "smoke"}
+CLASS_NAMES = {0: "person", 1: "smoke", 2: "fire"}
 CLASS_COLORS = {
     0: {"hex": "#00e5ff", "name": "Person"},   # Bright Cyan for Person
-    1: {"hex": "#ff1744", "name": "Fire"},     # Vivid Red for Fire
-    2: {"hex": "#ffea00", "name": "Smoke"}     # Bright Yellow for Smoke
+    1: {"hex": "#ffea00", "name": "Smoke"},    # Bright Yellow for Smoke
+    2: {"hex": "#ff1744", "name": "Fire"}      # Vivid Red for Fire
 }
 
 MODEL_MAP = {

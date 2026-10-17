@@ -16,7 +16,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODELS_DIR = os.path.join(BASE_DIR, "models")
 TEST_IMAGES_DIR = os.path.join(BASE_DIR, "test_images")
 
-CLASSES = ["person", "fire", "smoke"]
+CLASSES = ["person", "smoke", "fire"]
 
 MODEL_MAP = {
     "baseline": "3class_split_qdq.onnx",
@@ -104,7 +104,7 @@ def postprocess(outs, h0, w0, r, dw, dh, conf_threshold=0.25, nms_threshold=0.45
 
 
 def draw_detections(image, boxes, scores, cls_ids):
-    COLORS = {0: (0, 255, 0), 1: (0, 0, 255), 2: (128, 128, 128)}
+    COLORS = {0: (0, 255, 0), 1: (128, 128, 128), 2: (0, 0, 255)}
     for box, score, cid in zip(boxes, scores, cls_ids):
         x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
         color = COLORS.get(cid, (255, 255, 255))
